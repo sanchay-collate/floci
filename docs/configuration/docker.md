@@ -48,6 +48,28 @@ services:
 
 Use this only when the socket's permissions require root. Without the option, Floci retains its unprivileged default. The setting applies to the container entrypoint, not to `floci.docker` configuration.
 
+## Data Directory Ownership
+
+When started as root, the entrypoint checks whether the application user can write
+and traverse `FLOCI_STORAGE_PERSISTENT_PATH`. An already-writable directory starts
+without a recursive ownership scan. An inaccessible directory is repaired before
+dropping privileges, preserving support for fresh root-owned volumes.
+
+`FLOCI_DATA_OWNERSHIP` controls this entrypoint behavior:
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | Repair recursively only when UID 1001 cannot write and traverse the data root. Skip repair when running as root. |
+| `always` | Repair recursively on every root-started launch, including with `FLOCI_RUN_AS_ROOT=true`. Use once to repair mixed ownership below an otherwise writable data root. |
+| `skip` | Never change ownership. Prepare the volume permissions yourself. |
+
+The automatic check does not inspect every descendant. If older files or nested
+directories have different owners, start once with `FLOCI_DATA_OWNERSHIP=always`
+and then return to `auto`. Recursive repair can take time on large bind mounts.
+An entrypoint that is already running without root privileges cannot repair
+ownership in any mode. The entrypoint still warns if its final user cannot create
+and remove a file in the data directory.
+
 ## Connection Pool
 
 Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.

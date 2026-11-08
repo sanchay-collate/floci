@@ -50,6 +50,12 @@ fi
 EOF
 cat > "${WORK}/root-bin/chroot" <<'EOF'
 #!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = /bin/sh ]; then
+        [ "${TEST_STATE_WRITABLE:-false}" = true ]
+        exit $?
+    fi
+done
 printf 'dropped privileges\n'
 EOF
 # Record chown's arguments instead of changing ownership (the tests run unprivileged).
@@ -57,16 +63,26 @@ cat > "${WORK}/root-bin/chown" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "${WORK}/chown.log"
 EOF
-chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot" "${WORK}/root-bin/chown"
+cat > "${WORK}/root-bin/stat" <<'EOF'
+#!/bin/sh
+# The entrypoint runs in Linux images; the host running these tests may use BSD stat.
+if [ "$1" = -c ] && [ "$2" = %g ] && [ "$3" = /var/run/docker.sock ]; then
+    printf '0\n'
+else
+    echo "Unexpected stat arguments: $*" >&2
+    exit 1
+fi
+EOF
+chmod +x "${WORK}/root-bin/id" "${WORK}/root-bin/chroot" "${WORK}/root-bin/chown" "${WORK}/root-bin/stat"
 
 # Runs the root phase with the given state dir and prints every path chown was asked to re-own.
 # TEST_SH picks the shell that runs the entrypoint (default sh), so a case can pin bash.
-# A root phase that stops before the privilege drop prints a marker instead, so an empty result
-# can only mean chown was never called.
+# A root phase that reaches neither the privilege drop nor the explicit root command prints
+# a marker instead, so an empty result can only mean chown was never called.
 chowned() {
     : > "${WORK}/chown.log"
     if ! PATH="${WORK}/root-bin:${PATH}" FLOCI_STORAGE_PERSISTENT_PATH="$1" LOCALSTACK_PARITY=false \
-        "${TEST_SH:-sh}" "${SCRIPT}" echo preserved 2>"${WORK}/chown.err" | grep -q 'dropped privileges'; then
+        "${TEST_SH:-sh}" "${SCRIPT}" echo preserved 2>"${WORK}/chown.err" | grep -Eq '^(dropped privileges|preserved)$'; then
         printf 'root phase did not reach the privilege drop\n'
     fi
     cat "${WORK}/chown.log"
@@ -105,6 +121,31 @@ assert_eq "CDPATH does not redirect a relative path" \
     "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
     "$(cd "${WORK}" && CDPATH="${WORK}/elsewhere" chowned custom-data)"
 
+assert_eq "auto skips recursion when the application user can write the data root" \
+    "" \
+    "$(TEST_STATE_WRITABLE=true chowned "${CUSTOM_DIR}")"
+
+assert_eq "always repairs mixed ownership even under a writable data root" \
+    "--preserve-root -R floci:root ${CUSTOM_DIR_PHYSICAL}" \
+    "$(TEST_STATE_WRITABLE=true FLOCI_DATA_OWNERSHIP=always chowned "${CUSTOM_DIR}")"
+
+assert_eq "skip leaves an unwritable data root untouched" \
+    "" \
+    "$(FLOCI_DATA_OWNERSHIP=skip chowned "${CUSTOM_DIR}")"
+
+assert_eq "running as root does not repair ownership automatically" \
+    "" \
+    "$(FLOCI_RUN_AS_ROOT=true chowned "${CUSTOM_DIR}")"
+
+if FLOCI_DATA_OWNERSHIP=invalid sh "${SCRIPT}" echo unexpected >"${WORK}/invalid.out" 2>"${WORK}/invalid.err"; then
+    assert_eq "invalid ownership mode fails" "failure" "success"
+else
+    assert_eq "invalid ownership mode explains accepted values" \
+        "FLOCI_DATA_OWNERSHIP must be auto, always, or skip (got: invalid)." \
+        "$(cat "${WORK}/invalid.err")"
+    assert_eq "invalid ownership mode does not execute the command" "" "$(cat "${WORK}/invalid.out")"
+fi
+
 assert_eq "root skips a state dir that does not exist" \
     "" \
     "$(chowned "${WORK}/absent")"
@@ -112,6 +153,15 @@ assert_eq "root skips a state dir that does not exist" \
 assert_eq "root never re-owns /" \
     "" \
     "$(chowned /)"
+
+assert_eq "always cannot override the root-directory guard" \
+    "" \
+    "$(FLOCI_DATA_OWNERSHIP=always chowned /)"
+
+ln -s / "${WORK}/root-link"
+assert_eq "always cannot repair a symlink to the filesystem root" \
+    "" \
+    "$(FLOCI_DATA_OWNERSHIP=always chowned "${WORK}/root-link")"
 
 assert_eq "root never re-owns //" \
     "" \

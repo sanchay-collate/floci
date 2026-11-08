@@ -16,6 +16,12 @@
 
 set -eu
 
+ownership="${FLOCI_DATA_OWNERSHIP:-auto}"
+case "$ownership" in
+    auto|always|skip) ;;
+    *) echo "FLOCI_DATA_OWNERSHIP must be auto, always, or skip (got: $ownership)." >&2; exit 1 ;;
+esac
+
 if [ "$(id -u)" = '0' ]; then
     groups='0'
     if [ -S /var/run/docker.sock ]; then
@@ -25,22 +31,29 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
-    # Re-own the state dir for the case where a volume or host bind-mount
-    # arrives with ownership the floci user cannot write to. This is the same
-    # directory the writability probe below checks, so a volume mounted at a
-    # custom FLOCI_STORAGE_PERSISTENT_PATH is fixed up too. The path is resolved
-    # physically first, then compared by inode rather than by string: bash keeps a leading //
-    # (POSIX leaves it implementation-defined), so a string test would let // through.
-    # --preserve-root is the second guard. Ignore errors
-    # (read-only mounts, unusual filesystems) so the container still starts.
+    # A recursive walk over a large bind mount can take minutes even when every
+    # file already has the right owner. Check access as the application user first.
+    # Mixed ownership below a writable root can be repaired explicitly with always.
+    # Resolve physically and compare by inode so /, //, and symlinks to / stay safe.
     state_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
-    if [ -d "$state_dir" ]; then
+    if [ "$ownership" != skip ] && [ -d "$state_dir" ]; then
         # CDPATH is cleared so a relative path cannot be looked up elsewhere (and echoed).
-        state_dir_physical="$(CDPATH= cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
+        state_dir_physical="$(CDPATH='' cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
         if [ "$state_dir_physical" -ef / ]; then
             echo "WARNING: not changing ownership of $state_dir, it resolves to /." >&2
         elif [ -n "$state_dir_physical" ]; then
-            chown --preserve-root -R floci:root "$state_dir_physical" 2>/dev/null || true
+            repair=false
+            if [ "$ownership" = always ]; then
+                repair=true
+            elif [ "${FLOCI_RUN_AS_ROOT:-false}" != true ] && ! chroot \
+                --userspec=1001:0 --groups="$groups" --skip-chdir / \
+                /bin/sh -c 'test -w "$1" && test -x "$1"' sh "$state_dir_physical" >/dev/null 2>&1; then
+                repair=true
+            fi
+            if [ "$repair" = true ]; then
+                echo "Repairing ownership of $state_dir_physical for uid 1001; large data stores may take time." >&2
+                chown --preserve-root -R floci:root "$state_dir_physical" 2>/dev/null || true
+            fi
         fi
     fi
 
