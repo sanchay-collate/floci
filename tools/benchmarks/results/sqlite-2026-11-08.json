@@ -121,5 +121,47 @@
     "Cgroup memory includes file cache; process RSS is reported separately.",
     "The full-scale runs precede the cursor-range correction and Error-rollback safeguard. Startup and storage layout are unchanged by those follow-ups.",
     "Times are development-machine observations, not a controlled throughput or sustained-write comparison."
-  ]
+  ],
+  "final_validation": {
+    "implementation_commit": "5f55e5bf751f2e75137feacb97f15f4f4bf50f89",
+    "native_image_id": "sha256:e5fb4ce0bf0e0be10535727e1f4c990d1fc7dbd640e63b32e10301dd935a544a",
+    "java_tests_passed": 489,
+    "sqlite_query_step_budget": {
+      "fixture_rows": 50000,
+      "maximum_steps": 10000,
+      "passed": true
+    },
+    "sdk_checks": [
+      "UTF-8 keys, literal version delimiter, object pages and common-prefix seeks",
+      "version promotion, tags, delete markers and version pagination",
+      "multipart bodies and presigned PUT",
+      "S3 to SQS notification delivery",
+      "clean restart preserves current and historical bodies",
+      "acknowledged metadata survives SIGKILL and SQLite WAL recovery",
+      "offline JSON cleanup is reimported without resurrecting removed metadata"
+    ],
+    "native_fixture_rows": 100000,
+    "native_fixture_memory_limit": "1g",
+    "native_import_seconds": 10.924,
+    "native_requests": {
+      "objects": {
+        "seconds": 0.02,
+        "rows": 1000
+      },
+      "versions": {
+        "seconds": 0.016,
+        "rows": 1000
+      },
+      "delimiter": {
+        "seconds": 0.003,
+        "rows": 0
+      },
+      "puts": {
+        "seconds": 0.236,
+        "requests": 32
+      }
+    },
+    "native_reopen_seconds": 1.412,
+    "native_shutdown_export_verified": true
+  }
 }

@@ -88,3 +88,10 @@ when skipping ranges or resuming deep pages. The full-scale measurements precede
 that correction and the additional Error-rollback safeguard, so they are retained
 as a baseline rather than presented as a retiming of the final image. See the SDK
 smoke test and the storage/S3 regression tests for correctness and recovery coverage.
+
+The final implementation commit, `5f55e5bf751f2e75137feacb97f15f4f4bf50f89`,
+passed 489 focused Java tests, Checkstyle, a Linux ARM64 native build, and the native
+SDK smoke checks. A separate final-image fixture of 100,000 rows passed migration,
+verified clean export/reopen, 1,000-entry object/version pages, and PUTs under a 1 GiB
+container limit. Its corrected delimiter query took 3 ms. The result JSON records
+the final immutable image ID and these checks separately from the full-scale baseline.
