@@ -41,6 +41,7 @@ public class StorageFactory {
     private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
     private final List<HybridStorage<?, ?>> hybridBackends = new ArrayList<>();
     private final List<WalStorage<?, ?>> walBackends = new ArrayList<>();
+    private final List<SqliteStorage<?>> sqliteBackends = new ArrayList<>();
     private final List<PartitionedFileStorage<?>> partitionedBackends = new ArrayList<>();
     // Backends whose initial load has completed. create() loads each backend exactly once and
     // loadAll() only picks up backends that were never loaded, so neither path replays a store
@@ -145,6 +146,41 @@ public class StorageFactory {
         loadOnce(backend);
         allBackends.add(backend);
         backendsByPath.put(filePath, backend);
+        return backend;
+    }
+
+    /** Selects a disk index for an explicitly indexed store, retaining the normal backend by default. */
+    public synchronized <V> AccountAwareStorageBackend<V> createIndexed(String serviceName, String fileName,
+            TypeReference<Map<String, V>> typeReference, WriteProfile profile, IndexedStorage.Projection<V> projection) {
+        if (config == null) {
+            return create(serviceName, fileName, typeReference, profile);
+        }
+        String layout = config.storage().services().s3().objectIndexLayout();
+        if (layout == null || "json".equals(layout) || "memory".equals(resolveMode(serviceName))) {
+            return create(serviceName, fileName, typeReference, profile);
+        }
+        if (!"sqlite".equals(layout)) {
+            throw new IllegalArgumentException("S3 object-index-layout must be json or sqlite: " + layout);
+        }
+        Path base = Path.of(config.storage().persistentPath());
+        Path logicalPath = base.resolve(fileName);
+        StorageBackend<?, ?> existing = backendsByPath.get(logicalPath);
+        if (existing != null) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<V> typed = (AccountAwareStorageBackend<V>) existing;
+            return typed;
+        }
+        Path snapshot = "wal".equals(resolveMode(serviceName))
+                ? base.resolve(fileName.replace(".json", "-snapshot.json")) : logicalPath;
+        SqliteStorage<V> sqlite = new SqliteStorage<>(base.resolve(fileName.replace(".json", ".sqlite")),
+                snapshot, base.resolve(fileName.replace(".json", ".wal")), typeReference, projection,
+                config.storage().services().s3().sqliteCacheKib());
+        AccountAwareStorageBackend<V> backend = new AccountAwareStorageBackend<>(
+                sqlite, requestContextInstance, config.defaultAccountId());
+        loadOnce(backend);
+        sqliteBackends.add(sqlite);
+        allBackends.add(backend);
+        backendsByPath.put(logicalPath, backend);
         return backend;
     }
 
@@ -312,6 +348,9 @@ public class StorageFactory {
         }
         for (WalStorage<?, ?> wal : walBackends) {
             runCollecting(wal::shutdown, failures);
+        }
+        for (SqliteStorage<?> sqlite : sqliteBackends) {
+            runCollecting(sqlite::close, failures);
         }
         for (PartitionedFileStorage<?> partitioned : partitionedBackends) {
             runCollecting(partitioned::shutdown, failures);

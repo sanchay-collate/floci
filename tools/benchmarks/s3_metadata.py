@@ -4,10 +4,12 @@
 import argparse
 import http.client
 import json
+import sqlite3
 import subprocess
 import tempfile
 import time
 import uuid
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 ACCOUNT = "000000000000"
@@ -104,6 +106,55 @@ def memory_sample(container):
     return sample
 
 
+def exercise_index(port):
+    """Bounded listings plus committed writes on the large synthetic index."""
+    timings = {}
+    operations = [
+        ("objects", "GET", "/" + BUCKET + "?list-type=2&max-keys=1000", None),
+        ("versions", "GET", "/" + BUCKET + "?versions&max-keys=1000", None),
+        (
+            "delimiter",
+            "GET",
+            "/" + BUCKET + "?list-type=2&delimiter=/&max-keys=1",
+            None,
+        ),
+    ]
+    for name, method, path, body in operations:
+        started = time.monotonic()
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        try:
+            connection.request(method, path, body)
+            response = connection.getresponse()
+            payload = response.read()
+            if response.status != 200:
+                raise RuntimeError(
+                    f"{name} returned {response.status}: {payload[:300]!r}"
+                )
+            root = ElementTree.fromstring(payload)
+            rows = len(root.findall("{*}Contents")) + len(root.findall("{*}Version"))
+            timings[name] = {
+                "seconds": round(time.monotonic() - started, 3),
+                "rows": rows,
+            }
+        finally:
+            connection.close()
+    started = time.monotonic()
+    for number in range(32):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        try:
+            connection.request(
+                "PUT", "/" + BUCKET + f"/benchmark-writes/{number}", b"synthetic data"
+            )
+            response = connection.getresponse()
+            response.read()
+            if response.status != 200:
+                raise RuntimeError(f"PUT returned {response.status}")
+        finally:
+            connection.close()
+    timings["puts"] = {"seconds": round(time.monotonic() - started, 3), "requests": 32}
+    return timings
+
+
 def benchmark(args):
     # A missing image is an error, rather than an unexpected pull during a timed run.
     image = json.loads(docker("image", "inspect", args.image).stdout)[0]
@@ -113,6 +164,8 @@ def benchmark(args):
         "metadata_entries": args.entries,
         "metadata_padding_bytes": args.metadata_bytes,
         "memory_limit": args.memory,
+        "object_index_layout": args.object_index_layout,
+        "restarts": [],
         "cpus": args.cpus,
         "ready": False,
         "samples": [],
@@ -145,6 +198,10 @@ def benchmark(args):
             "--env",
             "FLOCI_SERVICES_UI_ENABLED=false",
         ]
+        command += [
+            "--env",
+            "FLOCI_STORAGE_SERVICES_S3_OBJECT_INDEX_LAYOUT=" + args.object_index_layout,
+        ]
         if args.entrypoint:
             command += [
                 "--mount",
@@ -154,33 +211,78 @@ def benchmark(args):
             ]
         container = docker(*command, args.image).stdout.strip()
         try:
-            started = time.monotonic()
-            docker("start", container)
-            port = int(
-                json.loads(docker("inspect", container).stdout)[0]["NetworkSettings"][
-                    "Ports"
-                ]["4566/tcp"][0]["HostPort"]
-            )
-            while time.monotonic() - started < args.timeout:
-                state = json.loads(docker("inspect", container).stdout)[0]["State"]
-                result["state"] = state
-                if not state["Running"]:
+            for run in range(args.restarts + 1):
+                current = result if run == 0 else {"ready": False, "samples": []}
+                if run:
+                    result["restarts"].append(current)
+                started = time.monotonic()
+                docker("start", container)
+                port = int(
+                    json.loads(docker("inspect", container).stdout)[0][
+                        "NetworkSettings"
+                    ]["Ports"]["4566/tcp"][0]["HostPort"]
+                )
+                while time.monotonic() - started < args.timeout:
+                    state = json.loads(docker("inspect", container).stdout)[0]["State"]
+                    current["state"] = state
+                    if not state["Running"]:
+                        break
+                    sample = memory_sample(container)
+                    sample["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                    sample["docker_health"] = state.get("Health", {}).get("Status")
+                    current["samples"].append(sample)
+                    if head_bucket(port) == 200:
+                        current["ready"] = True
+                        current["s3_ready_seconds"] = round(
+                            time.monotonic() - started, 3
+                        )
+                        current["ready_memory"] = memory_sample(container)
+                        break
+                    time.sleep(1)
+                if current["ready"] and args.exercise_requests:
+                    current["requests"] = exercise_index(port)
+                    current["after_requests_memory"] = memory_sample(container)
+                current["storage_bytes"] = {
+                    file.name: file.stat().st_size
+                    for file in data.iterdir()
+                    if file.is_file()
+                }
+                if not current["ready"]:
                     break
-                sample = memory_sample(container)
-                sample["elapsed_seconds"] = round(time.monotonic() - started, 3)
-                result["samples"].append(sample)
-                if head_bucket(port) == 200:
-                    result["ready"] = True
-                    result["s3_ready_seconds"] = round(time.monotonic() - started, 3)
-                    result["ready_memory"] = memory_sample(container)
-                    break
-                time.sleep(1)
+                if run < args.restarts:
+                    docker("stop", "--time", "300", container, timeout=315)
+                    stopped = json.loads(docker("inspect", container).stdout)[0][
+                        "State"
+                    ]
+                    current["shutdown_exit_code"] = stopped["ExitCode"]
+                    # JVM/native signal handlers may preserve the standard SIGTERM status.
+                    if stopped["ExitCode"] not in (0, 143) or stopped["OOMKilled"]:
+                        raise RuntimeError(
+                            f"benchmark shutdown failed: {stopped['ExitCode']}"
+                        )
+                    if args.object_index_layout == "sqlite":
+                        database = data / "s3-objects.sqlite"
+                        connection = sqlite3.connect(
+                            database.as_uri() + "?mode=ro", uri=True
+                        )
+                        try:
+                            metadata = dict(connection.execute("SELECT k,v FROM meta"))
+                        finally:
+                            connection.close()
+                        if (
+                            metadata["revision"] != metadata["exported"]
+                            or "export.json" in metadata
+                        ):
+                            raise RuntimeError(
+                                "benchmark shutdown left unexported SQLite metadata"
+                            )
+                        current["shutdown_export_verified"] = True
             logs = docker("logs", "--tail", "100", container, check=False)
             result["logs"] = logs.stdout + logs.stderr
         finally:
             # Only the container created above is stopped. No Compose project or existing data is used.
             try:
-                docker("stop", "--time", "60", container, check=False, timeout=75)
+                docker("stop", "--time", "300", container, check=False, timeout=315)
             finally:
                 docker("rm", "--force", container, check=False)
     return result
@@ -192,6 +294,20 @@ def main():
         "--image",
         required=True,
         help="An image already present in the local Docker daemon",
+    )
+    parser.add_argument(
+        "--object-index-layout", choices=["json", "sqlite"], default="json"
+    )
+    parser.add_argument(
+        "--exercise-requests",
+        action="store_true",
+        help="Run bounded listings and 32 PUTs after readiness",
+    )
+    parser.add_argument(
+        "--restarts",
+        type=int,
+        default=0,
+        help="Reopen the same synthetic index after clean shutdown",
     )
     parser.add_argument("--entries", type=int, default=100_000)
     parser.add_argument("--metadata-bytes", type=int, default=256)
@@ -210,6 +326,7 @@ def main():
         or args.metadata_bytes < 0
         or args.timeout <= 0
         or args.cpus <= 0
+        or args.restarts < 0
     ):
         parser.error(
             "entries, timeout and cpus must be positive; metadata-bytes must be nonnegative"
@@ -224,12 +341,14 @@ def main():
             {
                 key: value
                 for key, value in result.items()
-                if key not in {"logs", "samples", "state"}
+                if key not in {"logs", "samples", "state", "restarts"}
             },
             indent=2,
         )
     )
-    return 0 if result["ready"] else 1
+    return (
+        0 if result["ready"] and all(run["ready"] for run in result["restarts"]) else 1
+    )
 
 
 if __name__ == "__main__":

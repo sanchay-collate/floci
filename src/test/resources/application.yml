@@ -34,6 +34,9 @@ floci:
     wal:
       compaction-interval-ms: 60000
     services:
+      s3:
+        object-index-layout: json
+        sqlite-cache-kib: 16384
       ssm:
         flush-interval-ms: 60000
       dynamodb:

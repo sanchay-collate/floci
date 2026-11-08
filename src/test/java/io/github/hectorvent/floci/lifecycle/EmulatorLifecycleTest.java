@@ -39,6 +39,7 @@ import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
@@ -82,6 +83,10 @@ import static org.mockito.Mockito.when;
 class EmulatorLifecycleTest {
 
     @Mock private StorageFactory storageFactory;
+    @Mock private S3Service s3Service;
+    @Mock private EmulatorConfig.S3ServiceConfig s3ServiceConfig;
+    @Mock private EmulatorConfig.ServiceStorageOverrides storageServicesConfig;
+    @Mock private EmulatorConfig.S3StorageConfig s3StorageConfig;
     @Mock private ServiceRegistry serviceRegistry;
     @Mock private EmulatorConfig config;
     @Mock private EmulatorConfig.StorageConfig storageConfig;
@@ -141,6 +146,7 @@ class EmulatorLifecycleTest {
     @BeforeEach
     void setUp() {
         Mockito.lenient().when(config.services()).thenReturn(servicesConfig);
+        Mockito.lenient().when(servicesConfig.s3()).thenReturn(s3ServiceConfig);
         Mockito.lenient().when(servicesConfig.ec2()).thenReturn(ec2ServiceConfig);
         Mockito.lenient().when(servicesConfig.ecs()).thenReturn(ecsServiceConfig);
         Mockito.lenient().when(ecsServiceConfig.taskRoleCredentials()).thenReturn(ecsTaskRoleCredentialsConfig);
@@ -178,7 +184,7 @@ class EmulatorLifecycleTest {
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,
                 persistentPathValidator,
-                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService);
+                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, s3Service);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(Collections.emptyIterator());
     }
@@ -187,6 +193,34 @@ class EmulatorLifecycleTest {
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.mode()).thenReturn("in-memory");
         when(storageConfig.persistentPath()).thenReturn("/app/data");
+    }
+
+    @Test
+    void sqliteMigrationCompletesBeforeStorageLoadAndReadiness() throws Exception {
+        when(s3ServiceConfig.enabled()).thenReturn(true);
+        when(config.storage()).thenReturn(storageConfig);
+        when(storageConfig.services()).thenReturn(storageServicesConfig);
+        when(storageServicesConfig.s3()).thenReturn(s3StorageConfig);
+        when(s3StorageConfig.objectIndexLayout()).thenReturn("sqlite");
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        InOrder order = Mockito.inOrder(persistentPathValidator, s3Service, storageFactory, initLifecycleState);
+        order.verify(persistentPathValidator).validateAtBoot();
+        order.verify(s3Service).listBuckets();
+        order.verify(storageFactory).loadAll();
+        order.verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void failedSqliteMigrationNeverReportsReady() {
+        when(s3ServiceConfig.enabled()).thenReturn(true);
+        when(config.storage()).thenReturn(storageConfig);
+        when(storageConfig.services()).thenReturn(storageServicesConfig);
+        when(storageServicesConfig.s3()).thenReturn(s3StorageConfig);
+        when(s3StorageConfig.objectIndexLayout()).thenReturn("sqlite");
+        doThrow(new IllegalStateException("migration failed")).when(s3Service).listBuckets();
+        assertThrows(IllegalStateException.class,
+                () -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+        verify(initLifecycleState, never()).markReadyCompleted();
     }
 
     @Test

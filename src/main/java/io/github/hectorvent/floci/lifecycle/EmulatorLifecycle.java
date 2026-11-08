@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
@@ -80,6 +81,7 @@ public class EmulatorLifecycle {
     int httpPort = 4566;
 
     private final StorageFactory storageFactory;
+    private final S3Service s3Service;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final IamService iamService;
@@ -163,8 +165,9 @@ public class EmulatorLifecycle {
                              PersistentPathValidator persistentPathValidator,
                              DynamoDbRuntime dynamoDbRuntime,
                              RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
-                             EksService eksService) {
+                             EksService eksService, S3Service s3Service) {
         this.storageFactory = storageFactory;
+        this.s3Service = s3Service;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.iamService = iamService;
@@ -233,6 +236,11 @@ public class EmulatorLifecycle {
         persistentPathValidator.validateAtBoot();
 
         serviceRegistry.logEnabledServices();
+        if (config.services().s3().enabled()
+                && "sqlite".equals(config.storage().services().s3().objectIndexLayout())) {
+            // Force the lazy S3 bean to finish migration before startup can report ready.
+            s3Service.listBuckets();
+        }
         storageFactory.loadAll();
         int sweptSessions = iamService.sweepOrphanedLambdaExecutionRoleSessions();
         if (sweptSessions > 0) {

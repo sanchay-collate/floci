@@ -49,10 +49,10 @@ public class S3Object {
 
     // Internal-only per-write stamp (not an S3 versionId, and set even when bucket versioning is
     // off - see S3Service#getLatestObject). A fresh value is assigned every time this key is
-    // overwritten; comparing two reads of it is how a GET detects whether a concurrent overwrite
+    // overwritten. It is persisted so disk-backed metadata reads retain the same token.
+    // Comparing two reads detects whether a concurrent overwrite
     // landed in the middle of reading this object's metadata and body, without holding a lock
     // for that read's full duration.
-    @JsonIgnore
     private String dataGeneration;
 
     // Internal-only s3.object.sequencer of the write that stored this instance, assigned under the

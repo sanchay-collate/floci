@@ -428,6 +428,13 @@ public interface EmulatorConfig {
 
     interface S3StorageConfig {
         Optional<String> mode();
+
+        /** JSON/WAL object metadata, or an indexed SQLite store with a bounded page cache. */
+        @WithDefault("json")
+        String objectIndexLayout();
+
+        @WithDefault("16384")
+        int sqliteCacheKib();
     }
 
     interface DynamoDbStorageConfig {

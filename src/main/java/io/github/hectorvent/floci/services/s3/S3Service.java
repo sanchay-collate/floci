@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.IndexedStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
@@ -280,6 +281,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private final IamService iamService;
     private final boolean globalBucketNamespace;
     private final IamPolicyEvaluator policyEvaluator;
+    private final S3ObjectPages indexedObjects;
 
     @Inject
     public S3Service(StorageFactory storageFactory, EmulatorConfig config,
@@ -294,9 +296,9 @@ public class S3Service implements Resettable, ResourceProvider {
                 storageFactory.create("s3", "s3-buckets.json",
                         new TypeReference<Map<String, Bucket>>() {
                         }),
-                storageFactory.create("s3", "s3-objects.json",
+                storageFactory.createIndexed("s3", "s3-objects.json",
                         new TypeReference<Map<String, S3Object>>() {
-                        }, WriteProfile.APPEND_HEAVY),
+                        }, WriteProfile.APPEND_HEAVY, new S3ObjectProjection(config.defaultAccountId())),
                 storageFactory.create("s3", "s3-annotations.json",
                         new TypeReference<Map<String, ObjectAnnotation>>() {
                         }),
@@ -398,6 +400,8 @@ public class S3Service implements Resettable, ResourceProvider {
                       boolean globalBucketNamespace) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
+        this.indexedObjects = objectStore instanceof IndexedStorage<?> indexed && indexed.supportsIndex()
+                ? new S3ObjectPages(indexedObjectStore(objectStore)) : null;
         this.annotationStore = annotationStore;
         this.accountPublicAccessBlockStore = accountPublicAccessBlockStore;
         this.dataRoot = dataRoot;
@@ -585,7 +589,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void deleteBucketLocked(String bucketName) {
-        if (!objectStore.scan(key -> key.startsWith(bucketPrefix(bucketName))).isEmpty()) {
+        if (indexedObjects != null ? indexedObjects.hasEntries(ownerId(), bucketName)
+                : !objectStore.scan(key -> key.startsWith(bucketPrefix(bucketName))).isEmpty()) {
             throw new AwsException("BucketNotEmpty",
                     "The bucket you tried to delete is not empty.", 409);
         }
@@ -2477,11 +2482,16 @@ public class S3Service implements Resettable, ResourceProvider {
             objectStore.get(latestKey).ifPresent(latest -> {
                 if (versionId.equals(storedVersionId(latest))) {
                     String vPrefix = versionedKey(bucketName, key, "");
-                    List<S3Object> remaining = objectStore.scan(k -> k.startsWith(vPrefix))
-                            .stream()
-                            .filter(candidate -> key.equals(candidate.getKey()))
-                            .collect(Collectors.toCollection(ArrayList::new));
-                    objectStore.get(versionedKey(bucketName, key, "null")).ifPresent(remaining::add);
+                    List<S3Object> remaining;
+                    if (indexedObjects != null) {
+                        remaining = indexedObjects.newestHistory(ownerId(), bucketName, key).stream().toList();
+                    } else {
+                        remaining = objectStore.scan(k -> k.startsWith(vPrefix))
+                                .stream()
+                                .filter(candidate -> key.equals(candidate.getKey()))
+                                .collect(Collectors.toCollection(ArrayList::new));
+                        objectStore.get(versionedKey(bucketName, key, "null")).ifPresent(remaining::add);
+                    }
                     if (remaining.isEmpty()) {
                         objectStore.delete(latestKey);
                         deleteFile(bucketName, key);
@@ -2567,6 +2577,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
         String keyPrefix = bucketName + "/";
         String fullPrefix = prefix != null ? keyPrefix + prefix : keyPrefix;
+
+        if (indexedObjects != null) {
+            return indexedObjects.listObjects(bucketOwnerAccount, bucketName, prefix, delimiter, maxKeys,
+                    continuationToken, startAfter);
+        }
 
         // Filter out versioned entries (contain #v#) and delete markers
         Predicate<String> keyFilter = key -> key.startsWith(fullPrefix)
@@ -3068,6 +3083,10 @@ public class S3Service implements Resettable, ResourceProvider {
     public ListVersionsResult listObjectVersions(String bucketName, String prefix, String delimiter, int maxKeys,
                                                  String keyMarker, String versionIdMarker) {
         ensureBucketExists(bucketName);
+        if (indexedObjects != null) {
+            return indexedObjects.listVersions(getBucketOwnerAccountId(bucketName), bucketName, prefix,
+                    delimiter, maxKeys, keyMarker, versionIdMarker);
+        }
 
         String versionPrefix = bucketName + "/";
         String fullPrefix = prefix != null ? versionPrefix + prefix : versionPrefix;
@@ -5864,6 +5883,18 @@ public class S3Service implements Resettable, ResourceProvider {
         List<String> failedBuckets = new ArrayList<>();
         List<RuntimeException> failures = new ArrayList<>();
         byAccount.forEach((accountId, buckets) -> {
+            if (indexedObjects != null) {
+                for (AccountAwareStorageBackend.AccountEntry<Bucket> entry : buckets) {
+                    try {
+                        RequestScopes.runAs(accountId, entry.value().getRegion(),
+                                () -> applyIndexedLifecycle(accountId, entry.key(), now));
+                    } catch (RuntimeException exception) {
+                        failedBuckets.add(entry.key());
+                        failures.add(exception);
+                    }
+                }
+                return;
+            }
             Set<String> bucketNames = new HashSet<>();
             buckets.forEach(entry -> bucketNames.add(entry.key()));
             Map<String, Map<String, KeyHistory>> histories;
@@ -5937,32 +5968,50 @@ public class S3Service implements Resettable, ResourceProvider {
         if (bucket == null || rules.of(bucket).rules().isEmpty()) {
             return;
         }
-        // Each key is planned from the unlocked snapshot, then read again, planned again and applied
-        // under the bucket monitor. Writes, tagging, Object Lock changes and lifecycle configuration
-        // changes hold the same monitor, so what is applied is what the key and the rules are now.
         for (Map.Entry<String, KeyHistory> entry : histories.entrySet()) {
-            String key = entry.getKey();
-            if (planLifecycle(rules.of(bucket), key, entry.getValue(), now).isEmpty()) {
-                continue;
-            }
-            synchronized (bucket) {
-                if (bucketStore.get(bucketName).orElse(null) != bucket) {
-                    return;
-                }
-                KeyHistory history = rereadKeyHistory(bucketName, key, entry.getValue());
-                if (history == null) {
-                    continue;
-                }
-                LifecyclePlan plan = planLifecycle(rules.of(bucket), key, history, now);
-                for (String versionId : plan.versionsToDelete()) {
-                    expireByLifecycle(bucket, bucketName, key, versionId);
-                }
-                if (plan.expireCurrent()) {
-                    expireByLifecycle(bucket, bucketName, key, null);
-                }
+            if (!applyLifecycleKey(bucketName, bucket, rules, entry.getKey(), entry.getValue(), now)) {
+                return;
             }
         }
         abortIncompleteMultipartUploads(bucket, bucketName, rules, now);
+    }
+
+    private void applyIndexedLifecycle(String account, String bucketName, Instant now) {
+        Bucket bucket = bucketStore.get(bucketName).orElse(null);
+        LifecycleRules rules = new LifecycleRules();
+        if (bucket == null || rules.of(bucket).rules().isEmpty()) {
+            return;
+        }
+        if (!indexedObjects.histories(account, bucketName, (key, history) -> applyLifecycleKey(bucketName, bucket, rules,
+                key, new KeyHistory(history.current(), history.versions()), now))) {
+            return;
+        }
+        abortIncompleteMultipartUploads(bucket, bucketName, rules, now);
+    }
+
+    /** Revalidate one unlocked snapshot under the same bucket monitor as writes and retention changes. */
+    private boolean applyLifecycleKey(String bucketName, Bucket bucket, LifecycleRules rules,
+                                      String key, KeyHistory snapshot, Instant now) {
+        if (planLifecycle(rules.of(bucket), key, snapshot, now).isEmpty()) {
+            return true;
+        }
+        synchronized (bucket) {
+            if (bucketStore.get(bucketName).orElse(null) != bucket) {
+                return false;
+            }
+            KeyHistory history = rereadKeyHistory(bucketName, key, snapshot);
+            if (history == null) {
+                return true;
+            }
+            LifecyclePlan plan = planLifecycle(rules.of(bucket), key, history, now);
+            for (String versionId : plan.versionsToDelete()) {
+                expireByLifecycle(bucket, bucketName, key, versionId);
+            }
+            if (plan.expireCurrent()) {
+                expireByLifecycle(bucket, bucketName, key, null);
+            }
+        }
+        return true;
     }
 
     /**
@@ -7606,11 +7655,11 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String nullVersionPrefix(String bucketName) {
+    static String nullVersionPrefix(String bucketName) {
         return bucketName + "/" + NULL_VERSION_STORAGE_PREFIX;
     }
 
-    private String versionedKey(String bucketName, String key, String versionId) {
+    static String versionedKey(String bucketName, String key, String versionId) {
         requirePublicObjectKey(key);
         if ("null".equals(versionId)) {
             return nullVersionPrefix(bucketName) + key;
@@ -7620,6 +7669,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private static String storedVersionId(S3Object object) {
         return object.getVersionId() != null ? object.getVersionId() : "null";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static IndexedStorage<S3Object> indexedObjectStore(StorageBackend<String, S3Object> store) {
+        return (IndexedStorage<S3Object>) store;
     }
 
     private static final String DATA_SUFFIX = ".s3data";

@@ -1,0 +1,125 @@
+{
+  "date": "2026-11-08",
+  "runtime": "Linux ARM64 native executable under Docker Desktop on macOS",
+  "benchmark_image_id": "sha256:6fa0bff0f42b59c376d8d0320a4a3b21ef5ca1a778472186e468c0f61e18bfe3",
+  "metadata_entries": 2000000,
+  "logical_objects": 1000000,
+  "metadata_padding_bytes": 256,
+  "input_snapshot_bytes": 1565000001,
+  "cpu_limit": 2,
+  "container_memory_limits": {
+    "json": "8g",
+    "sqlite": "2g"
+  },
+  "sqlite_cache_kib": 16384,
+  "json_start": {
+    "s3_ready_seconds": 55.448,
+    "ready_memory": {
+      "cgroup_current_bytes": 5557231616,
+      "cgroup_peak_bytes": 8382009344,
+      "process_peak_rss_bytes": 7304425472,
+      "process_rss_bytes": 4399398912
+    },
+    "storage_bytes": {
+      "resourceexplorer2-indexes.json": 491,
+      "resourceexplorer2-views.json": 527,
+      "s3-objects.json": 1565000001,
+      "resourceexplorer2-default-views.json": 140,
+      "s3-buckets.json": 173,
+      "s3-objects.wal": 0
+    }
+  },
+  "sqlite_import": {
+    "s3_ready_seconds": 254.927,
+    "ready_memory": {
+      "cgroup_current_bytes": 1951420416,
+      "cgroup_peak_bytes": 2147487744,
+      "process_peak_rss_bytes": 976433152,
+      "process_rss_bytes": 673009664
+    },
+    "requests": {
+      "objects": {
+        "seconds": 0.097,
+        "rows": 1000
+      },
+      "versions": {
+        "seconds": 0.026,
+        "rows": 1000
+      },
+      "delimiter": {
+        "seconds": 10.57,
+        "rows": 0
+      },
+      "puts": {
+        "seconds": 0.466,
+        "requests": 32
+      }
+    },
+    "storage_bytes": {
+      "resourceexplorer2-indexes.json": 491,
+      "s3-objects.sqlite.lock": 0,
+      "resourceexplorer2-views.json": 527,
+      "s3-objects.json": 1565000001,
+      "s3-objects.sqlite": 3805409280,
+      "resourceexplorer2-default-views.json": 140,
+      "s3-buckets.json": 173,
+      "s3-objects.json.before-sqlite": 1565000001,
+      "s3-objects.wal": 0,
+      "s3-objects.wal.before-sqlite": 0,
+      "s3-objects.sqlite-wal": 67108864,
+      "s3-objects.sqlite-shm": 7438336
+    },
+    "shutdown_exit_code": 143,
+    "shutdown_export_verified": true
+  },
+  "sqlite_reopen_after_32_puts": {
+    "s3_ready_seconds": 13.334,
+    "ready_memory": {
+      "cgroup_current_bytes": 1193234432,
+      "cgroup_peak_bytes": 1193304064,
+      "process_peak_rss_bytes": 149843968,
+      "process_rss_bytes": 149843968
+    },
+    "requests": {
+      "objects": {
+        "seconds": 0.036,
+        "rows": 1000
+      },
+      "versions": {
+        "seconds": 0.052,
+        "rows": 1000
+      },
+      "delimiter": {
+        "seconds": 0.008,
+        "rows": 0
+      },
+      "puts": {
+        "seconds": 0.352,
+        "requests": 32
+      }
+    },
+    "storage_bytes": {
+      "resourceexplorer2-indexes.json": 491,
+      "s3-objects.sqlite.lock": 0,
+      "resourceexplorer2-views.json": 527,
+      "resourceexplorer2-setup-tasks.json": 3,
+      "s3-objects.json": 2345061369,
+      "s3-objects.sqlite": 3805544448,
+      "resourceexplorer2-default-views.json": 140,
+      "s3-buckets.json": 1002,
+      "s3-objects.json.before-sqlite": 1565000001,
+      "s3-objects.wal": 0,
+      "s3-objects.wal.before-sqlite": 0,
+      "s3-objects.sqlite-wal": 2369032,
+      "s3-annotations.json": 3,
+      "s3-account-public-access-block.json": 3,
+      "s3-objects.sqlite-shm": 32768
+    }
+  },
+  "limitations": [
+    "Synthetic metadata, no existing object body tree. Filesystem caches were not cleared.",
+    "Cgroup memory includes file cache; process RSS is reported separately.",
+    "The full-scale runs precede the cursor-range correction and Error-rollback safeguard. Startup and storage layout are unchanged by those follow-ups.",
+    "Times are development-machine observations, not a controlled throughput or sustained-write comparison."
+  ]
+}

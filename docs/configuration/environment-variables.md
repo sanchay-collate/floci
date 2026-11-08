@@ -97,7 +97,11 @@ FLOCI_STORAGE_SERVICES_<SERVICE>_FLUSH_INTERVAL_MS=5000
 
 Available service names: `SSM`, `SQS`, `S3`, `DYNAMODB`, `SNS`, `LAMBDA`, `CLOUDWATCHLOGS`, `CLOUDWATCHMETRICS`, `SECRETSMANAGER`, `ACM`, `OPENSEARCH`, `RDS`, `ELASTICACHE`, `APPCONFIG`, `APPCONFIGDATA`, `BACKUP`, `FIS`.
 
-See [Storage Modes](./storage.md) for a full explanation of each mode.
+S3 also supports `FLOCI_STORAGE_SERVICES_S3_OBJECT_INDEX_LAYOUT=sqlite` for disk-backed
+object metadata (default `json`) and `FLOCI_STORAGE_SERVICES_S3_SQLITE_CACHE_KIB` for its
+page-cache budget (default `16384` KiB). The layout applies to non-memory S3 modes.
+
+See [Storage Modes](./storage.md) for migration, cleanup, and rollback requirements.
 
 ---
 

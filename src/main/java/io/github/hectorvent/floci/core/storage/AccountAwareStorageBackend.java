@@ -33,7 +33,7 @@ import java.util.stream.Collectors;
  * key is tried and the entry is migrated on read. This covers existing persistent/WAL data
  * created before multi-account support was added.
  */
-public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
+public class AccountAwareStorageBackend<V> implements IndexedStorage<V> {
 
     private static final Logger LOG = Logger.getLogger(AccountAwareStorageBackend.class);
 
@@ -123,7 +123,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     @Override
     public void delete(String key) {
-        delegate.delete(prefixed(key));
+        deleteForAccount(prefix(), key);
     }
 
     @Override
@@ -157,6 +157,39 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     @Override
     public void clear() {
         delegate.clear();
+    }
+
+    @Override
+    public boolean supportsIndex() {
+        return delegate instanceof IndexedStorage<?> indexed && indexed.supportsIndex();
+    }
+
+    @Override
+    public List<IndexedStorage.Entry<V>> page(String scope, String prefix, IndexedStorage.Cursor after,
+                                             int limit, IndexedStorage.View view) {
+        return pageForAccount(prefix(), scope, prefix, after, limit, view);
+    }
+
+    public List<IndexedStorage.Entry<V>> pageForAccount(String account, String scope, String prefix,
+            IndexedStorage.Cursor after, int limit, IndexedStorage.View view) {
+        return indexed().page(account + "/" + scope, prefix, after, limit, view);
+    }
+
+    @Override
+    public Optional<IndexedStorage.Entry<V>> version(String scope, String name, String version) {
+        return versionForAccount(prefix(), scope, name, version);
+    }
+
+    public Optional<IndexedStorage.Entry<V>> versionForAccount(String account, String scope, String name, String version) {
+        return indexed().version(account + "/" + scope, name, version);
+    }
+
+    @SuppressWarnings("unchecked")
+    private IndexedStorage<V> indexed() {
+        if (delegate instanceof IndexedStorage<?> indexed && indexed.supportsIndex()) {
+            return (IndexedStorage<V>) indexed;
+        }
+        throw new UnsupportedOperationException("This storage backend does not provide indexed queries");
     }
 
     // --- Explicit-account methods for async workers ---
@@ -435,7 +468,13 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public void deleteForAccount(String accountId, String key) {
-        delegate.delete(accountId + "/" + key);
+        if (supportsIndex() && defaultAccountId.equals(accountId)) {
+            // Indexed queries include pre-account rows in the default account. Remove a stale
+            // legacy alias with its canonical row so a deletion cannot make it visible again.
+            delegate.deleteAllAtomically(Set.of(accountId + "/" + key, key));
+        } else {
+            delegate.delete(accountId + "/" + key);
+        }
     }
 
     @Override
@@ -445,7 +484,12 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     public void deleteAllAtomicallyForAccounts(Map<String, Set<String>> keysByAccount) {
         Set<String> rawKeys = new LinkedHashSet<>();
-        keysByAccount.forEach((account, keys) -> keys.forEach(key -> rawKeys.add(account + "/" + key)));
+        keysByAccount.forEach((account, keys) -> keys.forEach(key -> {
+            rawKeys.add(account + "/" + key);
+            if (supportsIndex() && defaultAccountId.equals(account)) {
+                rawKeys.add(key);
+            }
+        }));
         delegate.deleteAllAtomically(rawKeys);
     }
 

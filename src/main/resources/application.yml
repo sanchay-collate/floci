@@ -211,6 +211,9 @@ floci:
       # metric datapoints, the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
+      s3:
+        object-index-layout: json
+        sqlite-cache-kib: 16384
       ssm:
         flush-interval-ms: 5000
       dynamodb:

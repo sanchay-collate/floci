@@ -1,6 +1,7 @@
 # Storage Modes
 
-Floci supports four storage backends. You can set a global default and override it per service.
+Floci supports four storage modes and an opt-in SQLite layout for S3 object metadata.
+You can set a global mode and override it per service.
 
 ## Modes
 
@@ -16,7 +17,7 @@ Floci supports four storage backends. You can set a global default and override 
 Services that need to replace related records together can use the opt-in
 `StorageBackend.putAllAtomically` operation. Values must be copied before modification;
 the operation does not make existing mutable objects immutable. Memory publication and
-individual scans see the whole batch. Separate reads are not a transaction. Atomic batches
+individual scans see the whole batch. Separate reads are not a transaction. The map-backed implementations of atomic batches
 copy the store's key/value map before publishing it, so their memory and CPU cost grows
 with the number of stored entries. Reads remain lock-free during snapshot writes and WAL
 compaction; ordinary writes retain their existing storage policy.
@@ -69,6 +70,8 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 | `FLOCI_STORAGE_SERVICES_SSM_FLUSH_INTERVAL_MS` | `5000` | SSM flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_SQS_MODE` | global default | SQS storage mode |
 | `FLOCI_STORAGE_SERVICES_S3_MODE` | global default | S3 storage mode |
+| `FLOCI_STORAGE_SERVICES_S3_OBJECT_INDEX_LAYOUT` | `json` | `json` or disk-backed `sqlite` metadata |
+| `FLOCI_STORAGE_SERVICES_S3_SQLITE_CACHE_KIB` | `16384` | SQLite page cache budget in KiB (64 to 1048576) |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE` | global default | DynamoDB storage mode |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | DynamoDB flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT` | `single-file` | `single-file` or `per-table` item files, see [DynamoDB](../services/dynamodb.md#item-layout-on-disk) |
@@ -97,6 +100,61 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
     (`floci-aws-rds-{volumeId}`). In `memory` mode the volume is automatically removed when the
     instance is deleted. In other modes the volume is retained unless
     `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
+
+## Disk-backed S3 object metadata
+
+The opt-in SQLite layout keeps the S3 object index on disk instead of retaining every
+object and version in a Java map. Object bodies, bucket metadata, annotations, and other
+AWS services keep their existing storage layouts. Enable it with a non-memory S3 mode:
+
+```sh
+FLOCI_STORAGE_SERVICES_S3_MODE=persistent
+FLOCI_STORAGE_SERVICES_S3_OBJECT_INDEX_LAYOUT=sqlite
+FLOCI_STORAGE_SERVICES_S3_SQLITE_CACHE_KIB=16384
+```
+
+With S3 in `memory` mode the layout setting is ignored. With `sqlite`, `persistent`,
+`hybrid`, and `wal` all commit object-index mutations synchronously in SQLite transactions.
+SQLite uses WAL journaling, `synchronous=FULL`, a bounded page cache, no memory mapping,
+and file-backed temporary storage. Its WAL must live on a local filesystem, not NFS.
+The cache budget covers SQLite pages, not the whole process or the operating system's
+file cache. S3 responses and object bodies still need memory while requests are handled.
+
+Object and version listings use indexed UTF-8 prefix ranges and bounded query pages.
+Lifecycle expiration visits one logical key's history at a time, rather than collecting
+all objects in all buckets. Memory for that sweep still grows with the largest individual
+key's version history. Internal callers explicitly asking for an unlimited listing also
+receive an unlimited result. Standard S3 API pages retain their normal limits.
+
+### Migration, cleanup, and rollback
+
+- The database is `s3-objects.sqlite` in the persistent directory. Its `-wal`, `-shm`,
+  and `.lock` siblings belong to the same store. Only one Floci process may open it.
+- First startup streams the existing JSON snapshot and replays `s3-objects.wal` in a
+  transaction. It does not build a full Java map. The original files are retained, and
+  `.before-sqlite` copies are made once before import. Allow disk space for the old
+  snapshot, backup, database, journal, and temporary export. Migration completes before
+  startup reports ready. This first import can take minutes; allow a longer container
+  health-check start period and shutdown grace for migration/export. Normal reopening
+  checks the legacy file fingerprints but does not decode every object. A malformed snapshot fails startup without publishing an empty
+  store. An incomplete legacy WAL tail is ignored and preserved in the backup, matching
+  the old journal's recovery boundary. Legacy frames over 16 MiB require compaction by
+  the old Floci version before migration.
+- SQLite commits replace periodic whole-index JSON compaction. An explicit state save or
+  clean shutdown streams a compatible JSON snapshot and empties the legacy WAL. In `wal`
+  mode the snapshot is `s3-objects-snapshot.json`; other modes use `s3-objects.json`.
+  Shutdown/export still takes time proportional to index size, but does not retain the
+  complete index in Java memory. Interrupted exports are recovered on next startup.
+- Every object-index mutation updates the legacy WAL's modification time without adding
+  legacy records. Existing cleanup guards that check index/WAL activity can continue to
+  wait for inactivity. Cleanup must stop Floci cleanly before editing the exported JSON
+  or removing body files. On restart, an externally changed export is reimported only
+  if SQLite has no unexported writes. If SQLite and the legacy files both changed, startup
+  refuses the ambiguous overwrite and preserves both for reconciliation.
+- Back up the complete data directory while Floci is stopped before deployment. To roll
+  back to the JSON layout or an older image, first complete a clean SQLite shutdown/export.
+  Do not point an old image at stale JSON after an abrupt SQLite exit. Keep object body
+  files and metadata together; never delete SQLite's journal while a writer is running.
 
 ## Recommended Profiles
 
